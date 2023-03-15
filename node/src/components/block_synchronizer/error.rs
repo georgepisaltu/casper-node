@@ -26,6 +26,7 @@ pub(crate) enum BlockAcquisitionError {
     InvalidAttemptToApplyDeploy {
         deploy_id: DeployId,
     },
+    InvalidAttemptToMarkBlockExecuted,
     InvalidAttemptToMarkComplete,
     InvalidAttemptToEnqueueBlockForExecution,
     ExecutionResults(super::execution_results_acquisition::Error),
@@ -35,6 +36,9 @@ impl Display for BlockAcquisitionError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             BlockAcquisitionError::InvalidStateTransition => write!(f, "invalid state transition"),
+            BlockAcquisitionError::InvalidAttemptToMarkBlockExecuted => {
+                write!(f, "invalid attempt to mark block executed")
+            }
             BlockAcquisitionError::InvalidAttemptToMarkComplete => {
                 write!(f, "invalid attempt to mark complete")
             }

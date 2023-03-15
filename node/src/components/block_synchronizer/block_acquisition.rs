@@ -24,6 +24,12 @@ use crate::{
     NodeRng,
 };
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, DataSize)]
+pub(super) enum ExecutionProgress {
+    SentForEnquement,
+    Enqueued,
+}
+
 // BlockAcquisitionState is a milestone oriented state machine; it is always in a resting state
 // indicating the last completed step, while attempting to acquire the necessary data to transition
 // to the next resting state milestone. the start and end of the workflow is linear, but the
@@ -103,6 +109,7 @@ pub(super) enum BlockAcquisitionState {
     ),
     HaveApprovalsHashes(Box<Block>, SignatureAcquisition, DeployAcquisition),
     HaveAllDeploys(Box<Block>, SignatureAcquisition),
+    HaveAllForExecution(Box<Block>, SignatureAcquisition, ExecutionProgress),
     HaveStrictFinalitySignatures(Box<Block>, SignatureAcquisition),
     Failed(BlockHash, Option<u64>),
 }
@@ -155,6 +162,13 @@ impl Display for BlockAcquisitionState {
                 block.header().height(),
                 block.hash()
             ),
+            BlockAcquisitionState::HaveAllForExecution(block, _, execution_progress) => write!(
+                f,
+                "have all for execution({}) for: {}, progress: {:?}",
+                block.header().height(),
+                block.hash(),
+                execution_progress,
+            ),
             BlockAcquisitionState::HaveStrictFinalitySignatures(block, _) => write!(
                 f,
                 "have strict finality({}) for: {}",
@@ -182,6 +196,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveAllExecutionResults(block, _, _, _)
             | BlockAcquisitionState::HaveApprovalsHashes(block, _, _)
             | BlockAcquisitionState::HaveAllDeploys(block, _)
+            | BlockAcquisitionState::HaveAllForExecution(block, _, _)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(block, _) => *block.hash(),
         }
     }
@@ -197,6 +212,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveBlock(block, _, _)
             | BlockAcquisitionState::HaveGlobalState(block, _, _, _)
             | BlockAcquisitionState::HaveAllExecutionResults(block, _, _, _)
+            | BlockAcquisitionState::HaveAllForExecution(block, _, _)
             | BlockAcquisitionState::HaveApprovalsHashes(block, _, _) => Some(block.clone()),
         }
     }
@@ -400,6 +416,19 @@ impl BlockAcquisitionState {
                     max_simultaneous_peers,
                 ))
             }
+            BlockAcquisitionState::HaveAllForExecution(block, _, execution_progress) => {
+                match execution_progress {
+                    ExecutionProgress::SentForEnquement => {
+                        Ok(BlockAcquisitionAction::enqueue_block_for_execution(
+                            *block.hash(),
+                            block.height(),
+                        ))
+                    }
+                    ExecutionProgress::Enqueued => {
+                        Ok(BlockAcquisitionAction::need_nothing(*block.hash()))
+                    }
+                }
+            }
             BlockAcquisitionState::HaveStrictFinalitySignatures(block, ..) => {
                 Ok(BlockAcquisitionAction::need_nothing(*block.hash()))
             }
@@ -421,6 +450,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveAllExecutionResults(block, _, _, _)
             | BlockAcquisitionState::HaveApprovalsHashes(block, _, _)
             | BlockAcquisitionState::HaveAllDeploys(block, ..)
+            | BlockAcquisitionState::HaveAllForExecution(block, _, _)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(block, _) => Some(block.height()),
         }
     }
@@ -454,6 +484,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveGlobalState(..)
             | BlockAcquisitionState::HaveAllExecutionResults(..)
             | BlockAcquisitionState::HaveAllDeploys(..)
+            | BlockAcquisitionState::HaveAllForExecution(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
             | BlockAcquisitionState::HaveApprovalsHashes(..)
             | BlockAcquisitionState::Failed(..) => return Ok(None),
@@ -498,6 +529,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveGlobalState(..)
             | BlockAcquisitionState::HaveAllExecutionResults(..)
             | BlockAcquisitionState::HaveAllDeploys(..)
+            | BlockAcquisitionState::HaveAllForExecution(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
             | BlockAcquisitionState::HaveApprovalsHashes(..)
             | BlockAcquisitionState::Failed(..) => {
@@ -517,6 +549,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveApprovalsHashes(_, acquired_signatures, ..)
             | BlockAcquisitionState::HaveAllExecutionResults(_, acquired_signatures, ..)
             | BlockAcquisitionState::HaveAllDeploys(_, acquired_signatures)
+            | BlockAcquisitionState::HaveAllForExecution(_, acquired_signatures, _)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(_, acquired_signatures)
             | BlockAcquisitionState::HaveWeakFinalitySignatures(_, acquired_signatures) => {
                 acquired_signatures.register_pending(validator);
@@ -609,6 +642,13 @@ impl BlockAcquisitionState {
                 acceptance = acquired_signatures.apply_signature(signature, validator_weights);
                 None
             }
+            BlockAcquisitionState::HaveAllForExecution(block, acquired_signatures, _) => {
+                maybe_block_hash = Some(*block.hash());
+                currently_acquiring_sigs =
+                    acquired_signatures.signature_weight() != SignatureWeight::Strict;
+                acceptance = acquired_signatures.apply_signature(signature, validator_weights);
+                None
+            }
             BlockAcquisitionState::HaveStrictFinalitySignatures(block, acquired_signatures) => {
                 maybe_block_hash = Some(*block.hash());
                 acceptance = acquired_signatures.apply_signature(signature, validator_weights);
@@ -692,6 +732,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveWeakFinalitySignatures(..)
             | BlockAcquisitionState::HaveAllExecutionResults(..)
             | BlockAcquisitionState::HaveAllDeploys(..)
+            | BlockAcquisitionState::HaveAllForExecution(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
             | BlockAcquisitionState::HaveApprovalsHashes(_, _, _)
             | BlockAcquisitionState::Failed(..) => {
@@ -740,6 +781,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveGlobalState(..)
             | BlockAcquisitionState::HaveAllExecutionResults(..)
             | BlockAcquisitionState::HaveAllDeploys(..)
+            | BlockAcquisitionState::HaveAllForExecution(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
             | BlockAcquisitionState::HaveApprovalsHashes(..)
             | BlockAcquisitionState::Failed(..) => {
@@ -782,6 +824,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveAllExecutionResults(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
             | BlockAcquisitionState::HaveApprovalsHashes(..)
+            | BlockAcquisitionState::HaveAllForExecution(..)
             | BlockAcquisitionState::Failed(..) => {
                 return Ok(());
             }
@@ -863,6 +906,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveAllExecutionResults(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
             | BlockAcquisitionState::HaveApprovalsHashes(..)
+            | BlockAcquisitionState::HaveAllForExecution(..)
             | BlockAcquisitionState::Failed(..) => {
                 return Ok(None);
             }
@@ -903,6 +947,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveAllExecutionResults(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
             | BlockAcquisitionState::HaveApprovalsHashes(..)
+            | BlockAcquisitionState::HaveAllForExecution(..)
             | BlockAcquisitionState::Failed(..) => {
                 return Ok(());
             }
@@ -944,6 +989,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
             | BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _)
             | BlockAcquisitionState::HaveAllDeploys(_, _)
+            | BlockAcquisitionState::HaveAllForExecution(_, _, _)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(_, _)
             | BlockAcquisitionState::Failed(_, _) => {
                 warn!(
@@ -964,8 +1010,7 @@ impl BlockAcquisitionState {
         Ok(maybe_acceptance)
     }
 
-    /// Register block executed for this block.
-    pub(super) fn register_block_execution_enqueued(
+    pub(super) fn register_have_all_for_execution(
         &mut self,
         need_execution_state: bool,
     ) -> Result<(), BlockAcquisitionError> {
@@ -981,10 +1026,11 @@ impl BlockAcquisitionState {
                     return Err(BlockAcquisitionError::InvalidAttemptToEnqueueBlockForExecution);
                 }
                 // this must be a block w/ no deploys and thus also no approvals hashes;
-                // we can go straight to strict finality
-                BlockAcquisitionState::HaveStrictFinalitySignatures(
+                // we can go straight to execution
+                BlockAcquisitionState::HaveAllForExecution(
                     block.clone(),
                     acquired_signatures.clone(),
+                    ExecutionProgress::SentForEnquement,
                 )
             }
             BlockAcquisitionState::HaveAllDeploys(block, acquired_signatures) => {
@@ -992,6 +1038,89 @@ impl BlockAcquisitionState {
                     "BlockAcquisition: registering block execution for: {}",
                     block.hash()
                 );
+                BlockAcquisitionState::HaveAllForExecution(
+                    block.clone(),
+                    acquired_signatures.clone(),
+                    ExecutionProgress::SentForEnquement,
+                )
+            }
+            BlockAcquisitionState::Initialized(..)
+            | BlockAcquisitionState::HaveWeakFinalitySignatures(..)
+            | BlockAcquisitionState::HaveBlockHeader(..)
+            | BlockAcquisitionState::HaveBlock(..)
+            | BlockAcquisitionState::HaveGlobalState(..)
+            | BlockAcquisitionState::HaveAllExecutionResults(..)
+            | BlockAcquisitionState::HaveApprovalsHashes(..)
+            | BlockAcquisitionState::HaveAllForExecution(..)
+            | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
+            | BlockAcquisitionState::Failed(..) => {
+                return Ok(());
+            }
+        };
+        self.set_state(new_state);
+        Ok(())
+    }
+
+    /// Register block executed for this block.
+    pub(super) fn register_block_execution_enqueued(
+        &mut self,
+    ) -> Result<(), BlockAcquisitionError> {
+        let new_state = match self {
+            BlockAcquisitionState::HaveAllForExecution(
+                block,
+                acquired_signatures,
+                execution_progress,
+            ) => {
+                info!(
+                    "BlockAcquisition: registering block execution enqueued for: {}",
+                    block.hash()
+                );
+                let execution_progress = match execution_progress {
+                    ExecutionProgress::SentForEnquement => ExecutionProgress::Enqueued,
+                    ExecutionProgress::Enqueued => ExecutionProgress::Enqueued,
+                };
+                BlockAcquisitionState::HaveAllForExecution(
+                    block.clone(),
+                    acquired_signatures.clone(),
+                    execution_progress,
+                )
+            }
+
+            BlockAcquisitionState::Initialized(..)
+            | BlockAcquisitionState::HaveWeakFinalitySignatures(..)
+            | BlockAcquisitionState::HaveBlockHeader(..)
+            | BlockAcquisitionState::HaveBlock(..)
+            | BlockAcquisitionState::HaveGlobalState(..)
+            | BlockAcquisitionState::HaveAllExecutionResults(..)
+            | BlockAcquisitionState::HaveApprovalsHashes(..)
+            | BlockAcquisitionState::HaveAllDeploys(..)
+            | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
+            | BlockAcquisitionState::Failed(..) => {
+                return Ok(());
+            }
+        };
+        self.set_state(new_state);
+        Ok(())
+    }
+
+    /// Register block executed for this block.
+    pub(super) fn register_block_executed(&mut self) -> Result<(), BlockAcquisitionError> {
+        let new_state = match self {
+            BlockAcquisitionState::HaveAllForExecution(
+                block,
+                acquired_signatures,
+                execution_progress,
+            ) => {
+                info!(
+                    "BlockAcquisition: registering block execution enqueued for: {}",
+                    block.hash()
+                );
+                match execution_progress {
+                    ExecutionProgress::SentForEnquement => {
+                        return Err(BlockAcquisitionError::InvalidAttemptToMarkBlockExecuted)
+                    }
+                    ExecutionProgress::Enqueued => {}
+                }
                 BlockAcquisitionState::HaveStrictFinalitySignatures(
                     block.clone(),
                     acquired_signatures.clone(),
@@ -1005,6 +1134,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveGlobalState(..)
             | BlockAcquisitionState::HaveAllExecutionResults(..)
             | BlockAcquisitionState::HaveApprovalsHashes(..)
+            | BlockAcquisitionState::HaveAllDeploys(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
             | BlockAcquisitionState::Failed(..) => {
                 return Ok(());
@@ -1069,6 +1199,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveGlobalState(..)
             | BlockAcquisitionState::HaveAllExecutionResults(..)
             | BlockAcquisitionState::HaveApprovalsHashes(..)
+            | BlockAcquisitionState::HaveAllForExecution(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
             | BlockAcquisitionState::Failed(..) => {
                 return Ok(());

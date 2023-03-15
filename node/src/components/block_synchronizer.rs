@@ -651,6 +651,12 @@ impl BlockSynchronizer {
                             })
                     }))
                 }
+                NeedNext::MarkHaveAllForExecution(_block_hash, _) => {
+                    if false == builder.should_fetch_execution_state() {
+                        builder.set_in_flight_latch();
+                        builder.register_have_all_for_execution();
+                    }
+                }
                 NeedNext::EnqueueForExecution(block_hash, _) => {
                     if false == builder.should_fetch_execution_state() {
                         builder.set_in_flight_latch();

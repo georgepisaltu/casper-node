@@ -36,6 +36,12 @@ pub(crate) enum NeedNext {
     #[display(fmt = "need next for {}: deploy {}", _0, _1)]
     DeployById(BlockHash, DeployId),
     #[display(
+        fmt = "need next for {}: mark have all for execution (height {})",
+        _0,
+        _1
+    )]
+    MarkHaveAllForExecution(BlockHash, u64),
+    #[display(
         fmt = "need next for {}: enqueue this block (height {}) for execution",
         _0,
         _1

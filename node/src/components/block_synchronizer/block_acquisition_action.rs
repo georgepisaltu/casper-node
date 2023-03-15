@@ -182,7 +182,7 @@ impl BlockAcquisitionAction {
             } else {
                 BlockAcquisitionAction {
                     peers_to_ask: vec![],
-                    need_next: NeedNext::EnqueueForExecution(block_hash, block_header.height()),
+                    need_next: NeedNext::MarkHaveAllForExecution(block_hash, block_header.height()),
                 }
             }
         } else {
@@ -196,6 +196,13 @@ impl BlockAcquisitionAction {
                 rng,
                 block_header,
             )
+        }
+    }
+
+    pub(super) fn enqueue_block_for_execution(block_hash: BlockHash, block_height: u64) -> Self {
+        BlockAcquisitionAction {
+            peers_to_ask: vec![],
+            need_next: NeedNext::EnqueueForExecution(block_hash, block_height),
         }
     }
 

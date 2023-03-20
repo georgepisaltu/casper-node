@@ -31,6 +31,11 @@ pub(crate) enum Event {
         block_hash: BlockHash,
         result: Option<(FinalizedBlock, Vec<Deploy>)>,
     },
+    #[from]
+    ExecutedBlockInValidate {
+        block: Box<Block>,
+        our_sig: FinalitySignature,
+    },
     MarkBlockExecutionEnqueued(BlockHash),
     MarkBlockExecuted(BlockHash),
     MarkBlockCompleted {
@@ -171,6 +176,9 @@ impl Display for Event {
             }
             Event::MadeFinalizedBlock { .. } => {
                 write!(f, "made finalized block")
+            }
+            Event::ExecutedBlockInValidate { .. } => {
+                write!(f, "executed block in validate")
             }
             Event::MarkBlockExecutionEnqueued(..) => {
                 write!(f, "mark block enqueued for execution")

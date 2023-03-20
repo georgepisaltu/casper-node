@@ -202,7 +202,7 @@ impl BlockAcquisitionState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Display)]
+#[derive(Clone, Copy, Debug, Display, PartialEq)]
 #[must_use]
 pub(super) enum Acceptance {
     #[display(fmt = "had it")]
@@ -269,6 +269,7 @@ impl BlockAcquisitionState {
         validator_weights: &EraValidatorWeights,
         rng: &mut NodeRng,
         is_historical: bool,
+        validator: bool,
         legacy_required_finality: LegacyRequiredFinality,
         max_simultaneous_peers: usize,
     ) -> Result<BlockAcquisitionAction, BlockAcquisitionError> {
@@ -313,6 +314,7 @@ impl BlockAcquisitionState {
                         validator_weights,
                         signatures,
                         is_historical,
+                        validator,
                         legacy_required_finality,
                         max_simultaneous_peers,
                     ))
@@ -341,6 +343,7 @@ impl BlockAcquisitionState {
                         validator_weights,
                         signatures,
                         is_historical,
+                        validator,
                         legacy_required_finality,
                         max_simultaneous_peers,
                     ))
@@ -396,6 +399,7 @@ impl BlockAcquisitionState {
                     validator_weights,
                     signatures,
                     is_historical,
+                    validator,
                     legacy_required_finality,
                     max_simultaneous_peers,
                 ))

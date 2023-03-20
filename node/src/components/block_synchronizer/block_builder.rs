@@ -73,6 +73,7 @@ pub(super) struct BlockBuilder {
     block_hash: BlockHash,
     should_fetch_execution_state: bool,
     requires_strict_finality: bool,
+    validator: bool,
     peer_list: PeerList,
 
     // progress tracking
@@ -118,8 +119,41 @@ impl BlockBuilder {
             peer_list: PeerList::new(max_simultaneous_peers, peer_refresh_interval),
             should_fetch_execution_state,
             requires_strict_finality,
+            validator: false,
             sync_start: Instant::now(),
             execution_progress: ExecutionProgress::Idle,
+            last_progress: Timestamp::now(),
+            in_flight_latch: None,
+        }
+    }
+
+    pub(super) fn new_validate(
+        block: Box<Block>,
+        our_sig: FinalitySignature,
+        validator_weights: EraValidatorWeights,
+        max_simultaneous_peers: u32,
+        peer_refresh_interval: TimeDiff,
+    ) -> Self {
+        let mut signature_acquisition =
+            SignatureAcquisition::new(validator_weights.validator_public_keys().cloned().collect());
+        signature_acquisition.set_is_checkable(true);
+        assert_eq!(
+            signature_acquisition.apply_signature(our_sig, &validator_weights),
+            Acceptance::NeededIt
+        );
+
+        BlockBuilder {
+            block_hash: *block.hash(),
+            era_id: Some(block.header().era_id()),
+            validator_weights: Some(validator_weights),
+            acquisition_state: BlockAcquisitionState::HaveAllDeploys(block, signature_acquisition),
+            peer_list: PeerList::new(max_simultaneous_peers, peer_refresh_interval),
+            should_fetch_execution_state: true,
+            requires_strict_finality: true,
+            validator: true,
+            sync_start: Instant::now(),
+            // todo! this is whatever
+            execution_progress: ExecutionProgress::Done,
             last_progress: Timestamp::now(),
             in_flight_latch: None,
         }
@@ -163,6 +197,7 @@ impl BlockBuilder {
             peer_list,
             should_fetch_execution_state,
             requires_strict_finality,
+            validator: false,
             sync_start: Instant::now(),
             execution_progress: ExecutionProgress::Idle,
             last_progress: Timestamp::now(),
@@ -204,6 +239,10 @@ impl BlockBuilder {
 
     pub(super) fn should_fetch_execution_state(&self) -> bool {
         self.should_fetch_execution_state
+    }
+
+    pub(super) fn validator(&self) -> bool {
+        self.validator
     }
 
     pub(super) fn sync_start_time(&self) -> Instant {
@@ -388,6 +427,7 @@ impl BlockBuilder {
             validator_weights,
             rng,
             self.should_fetch_execution_state,
+            self.validator,
             legacy_required_finality,
             max_simultaneous_peers,
         ) {

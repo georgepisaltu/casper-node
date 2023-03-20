@@ -1088,23 +1088,9 @@ impl Storage {
             StorageRequest::PutFinalitySignature {
                 signature,
                 responder,
-            } => {
-                let mut txn = self.env.begin_rw_txn()?;
-                let mut block_signatures = txn
-                    .get_value(self.block_metadata_db, &signature.block_hash)?
-                    .unwrap_or_else(|| {
-                        BlockSignatures::new(signature.block_hash, signature.era_id)
-                    });
-                block_signatures.insert_proof(signature.public_key, signature.signature);
-                let outcome = txn.put_value(
-                    self.block_metadata_db,
-                    &block_signatures.block_hash,
-                    &block_signatures,
-                    true,
-                )?;
-                txn.commit()?;
-                responder.respond(outcome).ignore()
-            }
+            } => responder
+                .respond(self.put_block_signature(signature)?)
+                .ignore(),
             StorageRequest::GetBlockSignature {
                 block_hash,
                 public_key,
@@ -1484,6 +1470,26 @@ impl Storage {
             return Ok(false);
         }
         Ok(true)
+    }
+
+    /// Writes a block signature to storage.
+    pub fn put_block_signature(
+        &mut self,
+        signature: Box<FinalitySignature>,
+    ) -> Result<bool, FatalStorageError> {
+        let mut txn = self.env.begin_rw_txn()?;
+        let mut block_signatures = txn
+            .get_value(self.block_metadata_db, &signature.block_hash)?
+            .unwrap_or_else(|| BlockSignatures::new(signature.block_hash, signature.era_id));
+        block_signatures.insert_proof(signature.public_key, signature.signature);
+        let outcome = txn.put_value(
+            self.block_metadata_db,
+            &block_signatures.block_hash,
+            &block_signatures,
+            true,
+        )?;
+        txn.commit()?;
+        Ok(outcome)
     }
 
     #[cfg(test)]
@@ -2163,7 +2169,7 @@ impl Storage {
     }
 
     /// Retrieves block signatures for a block with a given block hash.
-    fn read_block_signatures(
+    pub(crate) fn read_block_signatures(
         &self,
         block_hash: &BlockHash,
     ) -> Result<Option<BlockSignatures>, FatalStorageError> {

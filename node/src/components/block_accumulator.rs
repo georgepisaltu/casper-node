@@ -176,7 +176,7 @@ impl BlockAccumulator {
 
     /// Drops all old block acceptors and tracks new local block height;
     /// subsequent attempts to register a block lower than tip will be rejected.
-    fn register_local_tip(&mut self, height: u64, era_id: EraId) {
+    pub(crate) fn register_local_tip(&mut self, height: u64, era_id: EraId) {
         let new_local_tip = match self.local_tip {
             Some(current) => current.height < height && current.era_id <= era_id,
             None => true,

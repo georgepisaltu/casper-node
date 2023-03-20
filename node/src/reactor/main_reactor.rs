@@ -32,7 +32,7 @@ use crate::testing::network::NetworkedReactor;
 use crate::{
     components::{
         block_accumulator::{self, BlockAccumulator},
-        block_synchronizer::{self, BlockSynchronizer},
+        block_synchronizer::{self, BlockSynchronizer, BlockSynchronizerProgress},
         block_validator::{self, BlockValidator},
         consensus::{self, EraSupervisor},
         contract_runtime::ContractRuntime,
@@ -1308,12 +1308,19 @@ impl MainReactor {
                     block.hash(),
                 );
 
-                effects.extend(reactor::wrap_effects(
-                    MainEvent::Storage,
-                    effect_builder
-                        .put_finality_signature_to_storage(finality_signature.clone())
-                        .ignore(),
-                ));
+                // effects.extend(reactor::wrap_effects(
+                //     MainEvent::Storage,
+                //     effect_builder
+                //         .put_finality_signature_to_storage(finality_signature.clone())
+                //         .ignore(),
+                // ));
+                if let Err(storage_error) = self
+                    .storage
+                    .put_block_signature(Box::new(finality_signature.clone()))
+                {
+                    error!(%storage_error, "Storage error");
+                    return fatal!(effect_builder, "Fatal storage error").ignore();
+                }
 
                 effects.extend(reactor::wrap_effects(
                     MainEvent::BlockAccumulator,
@@ -1354,6 +1361,76 @@ impl MainReactor {
                     },
                 ),
             ));
+        }
+
+        if matches!(self.state, ReactorState::Validate) {
+            let our_sig = match self.storage.read_block_signatures(block.hash()) {
+                Ok(Some(block_signatures)) => {
+                    match block_signatures
+                        .get_finality_signature(self.validator_matrix.public_signing_key())
+                    {
+                        Some(our_sig) => our_sig,
+                        None => {
+                            return fatal!(
+                                effect_builder,
+                                "MetaBlock error: our signature should be in storage"
+                            )
+                            .ignore()
+                        }
+                    }
+                }
+                Ok(None) => {
+                    return fatal!(
+                        effect_builder,
+                        "MetaBlock error: our signature should be in storage"
+                    )
+                    .ignore()
+                }
+                Err(storage_error) => {
+                    error!(%storage_error, "Storage error");
+                    return fatal!(effect_builder, "Storage: whatever").ignore();
+                }
+            };
+
+            match self.block_synchronizer.historical_progress() {
+                BlockSynchronizerProgress::Idle => {}
+                BlockSynchronizerProgress::Synced(block_hash, _, _)
+                | BlockSynchronizerProgress::Syncing(block_hash, _, _) => {
+                    if block_hash != *block.hash() {
+                        let meta_block = MetaBlock {
+                            block,
+                            execution_results,
+                            state,
+                        };
+                        // todo! revisit queue design instead of this.
+                        effects.extend(
+                            effect_builder
+                                .set_timeout(std::time::Duration::from_millis(200))
+                                .event(|_| {
+                                    MainEvent::MetaBlockAnnouncement(MetaBlockAnnouncement(
+                                        meta_block,
+                                    ))
+                                }),
+                        );
+                        return effects;
+                    }
+                }
+                _ => todo!("error"),
+            }
+
+            // event to synchronizer to create validate builder
+            effects.extend(reactor::wrap_effects(
+                MainEvent::BlockSynchronizer,
+                self.block_synchronizer.handle_event(
+                    effect_builder,
+                    rng,
+                    block_synchronizer::Event::ExecutedBlockInValidate {
+                        block: Box::new((*block).clone()),
+                        our_sig,
+                    },
+                ),
+            ));
+            return effects;
         }
 
         if state.register_as_accumulator_notified().was_updated() {

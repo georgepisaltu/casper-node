@@ -160,6 +160,7 @@ impl BlockAcquisitionAction {
         validator_weights: &EraValidatorWeights,
         signature_acquisition: &mut SignatureAcquisition,
         is_historical: bool,
+        validator: bool,
         legacy_required_finality: LegacyRequiredFinality,
         max_simultaneous_peers: usize,
     ) -> Self {
@@ -167,11 +168,13 @@ impl BlockAcquisitionAction {
         let validator_keys = signature_acquisition.have_signatures();
         let signature_weight = validator_weights.signature_weight(validator_keys);
 
+        // todo! doc comment
+        let requires_strict_finality = validator || !is_historical;
         if enough_signatures(
             signature_weight,
             legacy_required_finality,
             signature_acquisition.is_checkable(),
-            is_historical,
+            requires_strict_finality,
         ) {
             if is_historical {
                 // we have enough signatures; need to make sure we've stored the necessary bits
@@ -308,6 +311,7 @@ impl BlockAcquisitionAction {
                 validator_weights,
                 signatures,
                 is_historical,
+                false,
                 legacy_required_finality,
                 max_simultaneous_peers,
             ),
@@ -319,11 +323,11 @@ fn enough_signatures(
     signature_weight: SignatureWeight,
     legacy_required_finality: LegacyRequiredFinality,
     is_checkable: bool,
-    is_historical: bool,
+    requires_strict_finality: bool,
 ) -> bool {
     if is_checkable {
         // Normal blocks:
-        signature_weight.is_sufficient(false == is_historical)
+        signature_weight.is_sufficient(requires_strict_finality)
     } else {
         // Legacy blocks:
         matches!((legacy_required_finality, signature_weight), |(

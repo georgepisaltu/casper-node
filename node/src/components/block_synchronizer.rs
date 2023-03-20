@@ -302,6 +302,36 @@ impl BlockSynchronizer {
         true
     }
 
+    pub(crate) fn register_block_in_validate(
+        &mut self,
+        block: Box<Block>,
+        our_sig: FinalitySignature,
+    ) -> bool {
+        if let Some(builder) = &self.historical {
+            if builder.block_hash() == *block.hash() && !builder.is_failed() {
+                return false;
+            }
+        }
+        let era_id = block.header().era_id();
+        let validator_weights =
+            if let Some(validator_weights) = self.validator_matrix.validator_weights(era_id) {
+                validator_weights
+            } else {
+                // todo!("error case");
+                return false;
+            };
+        let builder = BlockBuilder::new_validate(
+            block,
+            our_sig,
+            validator_weights,
+            self.max_simultaneous_peers,
+            self.config.peer_refresh_interval,
+        );
+        assert!(self.historical.is_none());
+        self.historical.replace(builder);
+        true
+    }
+
     /// Registers a sync leap result, if able.
     pub(crate) fn register_sync_leap(
         &mut self,
@@ -459,6 +489,11 @@ impl BlockSynchronizer {
                     warn!(%block_hash, "marked complete an already-complete block");
                     return effects;
                 }
+                let meta_block_state = if builder.validator() {
+                    MetaBlockState::new_after_validate_flow()
+                } else {
+                    MetaBlockState::new_after_historical_sync()
+                };
                 // other components need to know that we've added an historical block
                 // that they may be interested in
                 if let Some(block) = builder.maybe_block() {
@@ -471,7 +506,7 @@ impl BlockSynchronizer {
                                         let meta_block = MetaBlock::new(
                                             Arc::new(*block),
                                             execution_results,
-                                            MetaBlockState::new_after_historical_sync(),
+                                            meta_block_state,
                                         );
                                         effect_builder.announce_meta_block(meta_block).await
                                     }
@@ -1274,6 +1309,7 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                     Event::Request(_)
                     | Event::DisconnectFromPeer(_)
                     | Event::MadeFinalizedBlock { .. }
+                    | Event::ExecutedBlockInValidate { .. }
                     | Event::MarkBlockExecutionEnqueued(_)
                     | Event::MarkBlockExecuted(_)
                     | Event::MarkBlockCompleted { .. }
@@ -1420,6 +1456,14 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                         None => self.register_block_execution_not_enqueued(&block_hash),
                     }
                     effects
+                }
+                Event::ExecutedBlockInValidate { block, our_sig } => {
+                    if self.register_block_in_validate(block, our_sig) {
+                        self.need_next(effect_builder, rng)
+                    } else {
+                        // todo!("handle error here")
+                        Effects::new()
+                    }
                 }
                 Event::MarkBlockExecutionEnqueued(block_hash) => {
                     // when syncing a forward block the synchronizer considers it

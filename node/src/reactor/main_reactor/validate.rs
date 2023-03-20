@@ -2,8 +2,8 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::{
-    components::consensus::ChainspecConsensusExt,
-    effect::{EffectBuilder, Effects},
+    components::{block_synchronizer::BlockSynchronizerProgress, consensus::ChainspecConsensusExt},
+    effect::{requests::BlockSynchronizerRequest, EffectBuilder, EffectExt, Effects},
     reactor,
     reactor::main_reactor::{MainEvent, MainReactor},
     NodeRng,
@@ -32,6 +32,29 @@ impl MainReactor {
                 self.control_logic_default_delay.into(),
             );
         }
+
+        match self.block_synchronizer.historical_progress() {
+            BlockSynchronizerProgress::Idle => {}
+            BlockSynchronizerProgress::Syncing(_, _, _) => {
+                return ValidateInstruction::Do(
+                    Duration::ZERO,
+                    effect_builder.immediately().event(|_| {
+                        MainEvent::BlockSynchronizerRequest(BlockSynchronizerRequest::NeedNext)
+                    }),
+                );
+            }
+            BlockSynchronizerProgress::Executing(_, _, _) => todo!("error"),
+            BlockSynchronizerProgress::Synced(block_hash, height, era_id) => {
+                info!(%block_hash, "Executed and marked block complete as validator");
+                let switch_blocks = self.storage.read_highest_switch_block_headers(1).unwrap();
+                if let Some(switch_block) = switch_blocks.get(0) {
+                    self.switch_block = Some(switch_block.clone());
+                }
+                self.block_accumulator.register_local_tip(height, era_id);
+                self.block_synchronizer.purge_historical();
+            }
+        }
+
         if self.switch_block.is_none() {
             // validate status is only checked at switch blocks
             return ValidateInstruction::NonSwitchBlock;

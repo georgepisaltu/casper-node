@@ -85,6 +85,24 @@ impl State {
         }
     }
 
+    // rename this pls
+    pub(crate) fn new_after_validate_flow() -> Self {
+        State {
+            stored: true,                   // check
+            sent_to_deploy_buffer: true,    // check
+            updated_validator_matrix: true, // check
+            gossiped: true,                 // check
+            executed: true,                 // check
+            tried_to_sign: true,            // check
+            consensus_notified: true,       // check
+            accumulator_notified: true,     // check
+            synchronizer_notified: true,    // needs to be set to true
+            sufficient_finality: true,      // needs to be true
+            marked_complete: true,          // needs to be true
+            all_actions_done: false,        // needs to be false
+        }
+    }
+
     pub(crate) fn is_stored(&self) -> bool {
         self.stored
     }

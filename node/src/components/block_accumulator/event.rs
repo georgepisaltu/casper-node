@@ -21,12 +21,18 @@ pub(crate) enum Event {
         era_id: Option<EraId>,
         sender: NodeId,
     },
+    FetchedBlock {
+        block: Option<Block>,
+    },
     ReceivedBlock {
         block: Arc<Block>,
         sender: NodeId,
     },
     CreatedFinalitySignature {
         finality_signature: Box<FinalitySignature>,
+    },
+    FetchedFinalitySignatures {
+        block_signatures: Option<BlockSignatures>,
     },
     ReceivedFinalitySignature {
         finality_signature: Box<FinalitySignature>,
@@ -60,11 +66,17 @@ impl Display for Event {
                     sender, block_hash
                 )
             }
+            Event::FetchedBlock { block } => {
+                write!(f, "fetched {:?} from storage", block)
+            }
             Event::ReceivedBlock { block, sender } => {
                 write!(f, "received {} from {}", block, sender)
             }
             Event::CreatedFinalitySignature { finality_signature } => {
                 write!(f, "created {}", finality_signature)
+            }
+            Event::FetchedFinalitySignatures { block_signatures } => {
+                write!(f, "fetched {:?} from storage", block_signatures)
             }
             Event::ReceivedFinalitySignature {
                 finality_signature,

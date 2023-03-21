@@ -25,6 +25,7 @@ pub(super) struct BlockAcceptor {
     block_hash: BlockHash,
     meta_block: Option<MetaBlock>,
     signatures: BTreeMap<PublicKey, (FinalitySignature, BTreeSet<NodeId>)>,
+    already_stored: bool,
     peers: BTreeSet<NodeId>,
     last_progress: Timestamp,
 }
@@ -54,6 +55,7 @@ impl BlockAcceptor {
             block_hash,
             meta_block: None,
             signatures: BTreeMap::new(),
+            already_stored: false,
             peers: peers.into_iter().collect(),
             last_progress: Timestamp::now(),
         }
@@ -328,10 +330,12 @@ impl BlockAcceptor {
     }
 
     pub(super) fn has_sufficient_finality(&self) -> bool {
-        self.meta_block
-            .as_ref()
-            .map(|meta_block| meta_block.state.has_sufficient_finality())
-            .unwrap_or(false)
+        self.already_stored
+            || self
+                .meta_block
+                .as_ref()
+                .map(|meta_block| meta_block.state.has_sufficient_finality())
+                .unwrap_or(false)
     }
 
     pub(super) fn era_id(&self) -> Option<EraId> {
@@ -418,6 +422,23 @@ impl BlockAcceptor {
         }
 
         faulty_senders
+    }
+
+    pub(super) fn register_fetched_signatures(
+        &mut self,
+        block_signatures: &BlockSignatures,
+    ) -> Vec<FinalitySignature> {
+        self.already_stored = true;
+        let mut sigs_to_store = vec![];
+        for (finality_signature, _) in self.signatures.values() {
+            if !block_signatures
+                .proofs
+                .contains_key(&finality_signature.public_key)
+            {
+                sigs_to_store.push(finality_signature.clone());
+            }
+        }
+        sigs_to_store
     }
 
     fn touch(&mut self) {

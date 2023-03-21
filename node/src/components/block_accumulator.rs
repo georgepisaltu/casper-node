@@ -197,14 +197,14 @@ impl BlockAccumulator {
         block_hash: BlockHash,
         maybe_era_id: Option<EraId>,
         maybe_sender: Option<NodeId>,
-    ) {
+    ) -> bool {
         // If the acceptor already exists, just register the peer, if applicable.
         let entry = match self.block_acceptors.entry(block_hash) {
             btree_map::Entry::Occupied(entry) => {
                 if let Some(sender) = maybe_sender {
                     entry.into_mut().register_peer(sender);
                 }
-                return;
+                return false;
             }
             btree_map::Entry::Vacant(entry) => entry,
         };
@@ -220,7 +220,7 @@ impl BlockAccumulator {
                 // If we created the event, it's safe to create the acceptor.
                 if maybe_sender.is_some() {
                     debug!(?maybe_era_id, local_tip=?self.local_tip, "not creating acceptor");
-                    return;
+                    return false;
                 }
             }
         }
@@ -248,13 +248,43 @@ impl BlockAccumulator {
                     "rejecting block hash from peer who sent us more than {} within {}",
                     max_block_count, self.purge_interval,
                 );
-                return;
+                return false;
             }
             block_timestamps.push_back((block_hash, Timestamp::now()));
         }
 
         entry.insert(BlockAcceptor::new(block_hash, maybe_sender));
         self.metrics.block_acceptors.inc();
+        true
+    }
+
+    fn register_peer<REv>(
+        &mut self,
+        effect_builder: EffectBuilder<REv>,
+        block_hash: BlockHash,
+        maybe_era_id: Option<EraId>,
+        sender: NodeId,
+    ) -> Effects<Event>
+    where
+        REv: From<StorageRequest> + From<FatalAnnouncement> + Send,
+    {
+        let mut effects = Effects::new();
+        let created_acceptor = self.upsert_acceptor(block_hash, maybe_era_id, Some(sender));
+        if created_acceptor {
+            effects.extend(
+                effect_builder
+                    .get_block_from_storage(block_hash)
+                    .event(|block| Event::FetchedBlock { block }),
+            );
+            effects.extend(
+                effect_builder
+                    .get_signatures_from_storage(block_hash)
+                    .event(|block_signatures| Event::FetchedFinalitySignatures {
+                        block_signatures,
+                    }),
+            );
+        }
+        effects
     }
 
     fn register_block<REv>(
@@ -270,6 +300,7 @@ impl BlockAccumulator {
             + From<FatalAnnouncement>
             + Send,
     {
+        let mut effects = Effects::new();
         let block_hash = meta_block.block.hash();
         debug!(%block_hash, "registering block");
         let era_id = meta_block.block.header().era_id();
@@ -282,7 +313,17 @@ impl BlockAccumulator {
             debug!(%block_hash, "ignoring outdated block");
             return Effects::new();
         }
-        self.upsert_acceptor(*block_hash, Some(era_id), sender);
+
+        let created_acceptor = self.upsert_acceptor(*block_hash, Some(era_id), sender);
+        if created_acceptor {
+            effects.extend(
+                effect_builder
+                    .get_signatures_from_storage(*block_hash)
+                    .event(|block_signatures| Event::FetchedFinalitySignatures {
+                        block_signatures,
+                    }),
+            );
+        }
 
         let acceptor = match self.block_acceptors.get_mut(block_hash) {
             None => return Effects::new(),
@@ -374,9 +415,25 @@ impl BlockAccumulator {
             + From<FatalAnnouncement>
             + Send,
     {
+        let mut effects = Effects::new();
         let block_hash = finality_signature.block_hash;
         let era_id = finality_signature.era_id;
-        self.upsert_acceptor(block_hash, Some(era_id), sender);
+        let created_acceptor = self.upsert_acceptor(block_hash, Some(era_id), sender);
+        if created_acceptor {
+            effects.extend(
+                effect_builder
+                    .get_block_from_storage(block_hash)
+                    .event(|block| Event::FetchedBlock { block }),
+            );
+
+            effects.extend(
+                effect_builder
+                    .get_signatures_from_storage(block_hash)
+                    .event(|block_signatures| Event::FetchedFinalitySignatures {
+                        block_signatures,
+                    }),
+            );
+        }
 
         let acceptor = match self.block_acceptors.get_mut(&block_hash) {
             Some(acceptor) => acceptor,
@@ -384,13 +441,16 @@ impl BlockAccumulator {
             // early, ignoring the signature.
             None => {
                 warn!(%finality_signature, "no acceptor to receive finality_signature");
-                return Effects::new();
+                return effects;
             }
         };
 
         debug!(%finality_signature, "registering finality signature");
-        match acceptor.register_finality_signature(finality_signature, sender, self.validator_slots)
-        {
+        let new_effects = match acceptor.register_finality_signature(
+            finality_signature,
+            sender,
+            self.validator_slots,
+        ) {
             Ok(Some(finality_signature)) => self.store_block_and_finality_signatures(
                 effect_builder,
                 ShouldStore::SingleSignature(finality_signature),
@@ -467,7 +527,45 @@ impl BlockAccumulator {
                     )
                     .ignore(),
             },
+        };
+        effects.extend(new_effects);
+        effects
+    }
+
+    fn register_fetched_signatures<REv>(
+        &mut self,
+        effect_builder: EffectBuilder<REv>,
+        block_signatures: Option<BlockSignatures>,
+    ) -> Effects<Event>
+    where
+        REv: From<StorageRequest> + From<FatalAnnouncement> + Send,
+    {
+        let mut effects = Effects::new();
+        let block_signatures = match block_signatures {
+            Some(signatures) => signatures,
+            None => return Effects::new(),
+        };
+        let block_hash = block_signatures.block_hash;
+        let acceptor = match self.block_acceptors.get_mut(&block_hash) {
+            Some(acceptor) => acceptor,
+            // When there is no acceptor for it, this function returns
+            // early, ignoring the signatures.
+            None => {
+                warn!(%block_signatures, "no acceptor to receive fetched finality signatures");
+                return effects;
+            }
+        };
+
+        let sigs_to_store = acceptor.register_fetched_signatures(&block_signatures);
+        for sig in sigs_to_store {
+            effects.extend(
+                effect_builder
+                    .put_finality_signature_to_storage(sig)
+                    .ignore(),
+            );
         }
+
+        effects
     }
 
     fn register_stored<REv>(
@@ -783,9 +881,9 @@ impl<REv: ReactorEvent> Component<REv> for BlockAccumulator {
                 block_hash,
                 era_id,
                 sender,
-            } => {
-                self.upsert_acceptor(block_hash, era_id, Some(sender));
-                Effects::new()
+            } => self.register_peer(effect_builder, block_hash, era_id, sender),
+            Event::FetchedBlock { block } => {
+                todo!();
             }
             Event::ReceivedBlock { block, sender } => {
                 let meta_block = MetaBlock::new(block, vec![], MetaBlockState::new());
@@ -794,6 +892,9 @@ impl<REv: ReactorEvent> Component<REv> for BlockAccumulator {
             Event::CreatedFinalitySignature { finality_signature } => {
                 debug!(%finality_signature, "BlockAccumulator: CreatedFinalitySignature");
                 self.register_finality_signature(effect_builder, *finality_signature, None)
+            }
+            Event::FetchedFinalitySignatures { block_signatures } => {
+                self.register_fetched_signatures(effect_builder, block_signatures)
             }
             Event::ReceivedFinalitySignature {
                 finality_signature,

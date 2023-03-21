@@ -1253,6 +1253,24 @@ impl<REv> EffectBuilder<REv> {
         .await
     }
 
+    /// Gets the requested block signatures from storage.
+    pub(crate) async fn get_signatures_from_storage(
+        self,
+        block_hash: BlockHash,
+    ) -> Option<BlockSignatures>
+    where
+        REv: From<StorageRequest>,
+    {
+        self.make_request(
+            |responder| StorageRequest::GetBlockSignatures {
+                block_hash,
+                responder,
+            },
+            QueueKind::FromStorage,
+        )
+        .await
+    }
+
     /// Puts the requested block signatures into storage.
     ///
     /// If `signatures.proofs` is empty, no attempt to store will be made, an error will be logged,

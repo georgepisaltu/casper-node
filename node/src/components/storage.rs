@@ -1053,6 +1053,12 @@ impl Storage {
                     }))
                     .ignore()
             }
+            StorageRequest::GetBlockSignatures {
+                block_hash,
+                responder,
+            } => responder
+                .respond(self.read_block_signatures(&block_hash)?)
+                .ignore(),
             StorageRequest::PutBlockSignatures {
                 signatures,
                 responder,
@@ -2168,7 +2174,9 @@ impl Storage {
         block_hash: &BlockHash,
     ) -> Result<Option<BlockSignatures>, FatalStorageError> {
         let mut txn = self.env.begin_ro_txn()?;
-        self.get_block_signatures(&mut txn, block_hash)
+        let res = self.get_block_signatures(&mut txn, block_hash);
+        txn.commit()?;
+        res
     }
 
     /// Directly returns a deploy from internal store.

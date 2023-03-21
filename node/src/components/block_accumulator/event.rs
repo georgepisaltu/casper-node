@@ -12,6 +12,8 @@ use crate::{
     types::{Block, BlockHash, BlockSignatures, FinalitySignature, MetaBlock, NodeId},
 };
 
+use super::lazy_block::LazyBlock;
+
 #[derive(Debug, From)]
 pub(crate) enum Event {
     #[from]
@@ -36,7 +38,7 @@ pub(crate) enum Event {
         meta_block: MetaBlock,
     },
     Stored {
-        maybe_meta_block: Option<MetaBlock>,
+        maybe_meta_block: Option<LazyBlock>,
         maybe_block_signatures: Option<BlockSignatures>,
     },
 }
@@ -81,8 +83,8 @@ impl Display for Event {
             } => {
                 write!(
                     f,
-                    "stored {} and {} finality signatures",
-                    meta_block.block.hash(),
+                    "stored {:?} and {} finality signatures",
+                    meta_block.block_hash(),
                     maybe_block_signatures
                         .as_ref()
                         .map(|sigs| sigs.proofs.len())

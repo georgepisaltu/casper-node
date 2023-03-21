@@ -173,7 +173,7 @@ impl State {
         outcome
     }
 
-    pub(super) fn merge(mut self, other: State) -> Result<Self, MergeMismatchError> {
+    pub(crate) fn merge(mut self, other: State) -> Result<Self, MergeMismatchError> {
         let State {
             ref mut stored,
             ref mut sent_to_deploy_buffer,

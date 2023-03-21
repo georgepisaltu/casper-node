@@ -2,6 +2,7 @@ mod block_acceptor;
 mod config;
 mod error;
 mod event;
+mod lazy_block;
 mod leap_instruction;
 mod local_tip_identifier;
 mod metrics;
@@ -28,6 +29,7 @@ use crate::{
     components::{
         block_accumulator::{
             block_acceptor::{BlockAcceptor, ShouldStore},
+            lazy_block::LazyBlock,
             leap_instruction::LeapInstruction,
             local_tip_identifier::LocalTipIdentifier,
             metrics::Metrics,
@@ -45,8 +47,8 @@ use crate::{
     },
     fatal,
     types::{
-        ActivationPoint, BlockHash, BlockSignatures, FinalitySignature, MetaBlock, MetaBlockState,
-        NodeId, ValidatorMatrix,
+        ActivationPoint, BlockHash, BlockHeader, BlockSignatures, FinalitySignature, MetaBlock,
+        MetaBlockState, NodeId, ValidatorMatrix,
     },
     NodeRng,
 };
@@ -473,7 +475,7 @@ impl BlockAccumulator {
     fn register_stored<REv>(
         &self,
         effect_builder: EffectBuilder<REv>,
-        maybe_meta_block: Option<MetaBlock>,
+        maybe_meta_block: Option<LazyBlock>,
         maybe_block_signatures: Option<BlockSignatures>,
     ) -> Effects<Event>
     where
@@ -483,9 +485,14 @@ impl BlockAccumulator {
             + Send,
     {
         let mut effects = Effects::new();
-        if let Some(meta_block) = maybe_meta_block {
-            effects.extend(effect_builder.announce_meta_block(meta_block).ignore());
-        };
+        match maybe_meta_block {
+            Some(LazyBlock::NotPresent) | None => {}
+            Some(LazyBlock::MetaBlock(meta_block)) => {
+                effects.extend(effect_builder.announce_meta_block(meta_block).ignore());
+            }
+            Some(LazyBlock::Stored(block_hash, header, state)) => {}
+        }
+
         if let Some(block_signatures) = maybe_block_signatures {
             for finality_signature in block_signatures.finality_signatures() {
                 effects.extend(
@@ -638,11 +645,12 @@ impl BlockAccumulator {
             .set(self.block_children.len().try_into().unwrap_or(i64::MIN));
     }
 
-    fn update_block_children(&mut self, meta_block: &MetaBlock) {
-        if let Some(parent_hash) = meta_block.block.parent() {
+    fn update_block_children(&mut self, block_hash: BlockHash, block_header: &BlockHeader) {
+        if !block_header.is_genesis() {
+            let parent_hash = block_header.parent_hash();
             if self
                 .block_children
-                .insert(*parent_hash, *meta_block.block.hash())
+                .insert(*parent_hash, block_hash)
                 .is_none()
             {
                 self.metrics.known_child_blocks.inc();
@@ -670,7 +678,7 @@ impl BlockAccumulator {
             } => {
                 let block_hash = meta_block.block.hash();
                 debug!(%block_hash, "storing block and finality signatures");
-                self.update_block_children(&meta_block);
+                self.update_block_children(*block_hash, meta_block.block.header());
                 // The block wasn't executed yet, so we just put it to storage. An `ExecutedBlock`
                 // event will then re-trigger this flow and eventually mark it complete.
                 let cloned_signatures = block_signatures.clone();
@@ -678,7 +686,7 @@ impl BlockAccumulator {
                     .put_block_to_storage(Arc::clone(&meta_block.block))
                     .then(move |_| effect_builder.put_signatures_to_storage(cloned_signatures))
                     .event(move |_| Event::Stored {
-                        maybe_meta_block: Some(meta_block),
+                        maybe_meta_block: Some(LazyBlock::MetaBlock(meta_block)),
                         maybe_block_signatures: Some(block_signatures),
                     })
             }
@@ -686,13 +694,17 @@ impl BlockAccumulator {
                 meta_block,
                 block_signatures,
             } => {
-                let block_hash = meta_block.block.hash();
+                let (block_hash, block_header) =
+                    match (meta_block.block_hash(), meta_block.block_header()) {
+                        (Some(block_hash), Some(header)) => (block_hash, header),
+                        _ => return Effects::new(),
+                    };
                 debug!(%block_hash, "storing finality signatures and marking block complete");
-                self.update_block_children(&meta_block);
+                self.update_block_children(block_hash, block_header);
                 // The block was already executed, which means it is stored and we have the global
                 // state for it. As on this code path we also know it is sufficiently signed,
                 // we mark it as complete.
-                let block_height = meta_block.block.height();
+                let block_height = block_header.height();
                 effect_builder
                     .put_signatures_to_storage(block_signatures.clone())
                     .then(move |_| effect_builder.mark_block_completed(block_height))
@@ -702,9 +714,13 @@ impl BlockAccumulator {
                     })
             }
             ShouldStore::MarkComplete(meta_block) => {
-                let block_hash = meta_block.block.hash();
+                let (block_hash, block_header) =
+                    match (meta_block.block_hash(), meta_block.block_header()) {
+                        (Some(block_hash), Some(header)) => (block_hash, header),
+                        _ => return Effects::new(),
+                    };
                 debug!(%block_hash, "marking block complete");
-                let block_height = meta_block.block.height();
+                let block_height = block_header.height();
                 effect_builder
                     .mark_block_completed(block_height)
                     .event(move |_| Event::Stored {

@@ -20,10 +20,12 @@ use crate::{
 #[cfg(test)]
 use rand::Rng as _;
 
+use super::lazy_block::LazyBlock;
+
 #[derive(DataSize, Debug)]
 pub(super) struct BlockAcceptor {
     block_hash: BlockHash,
-    meta_block: Option<MetaBlock>,
+    meta_block: LazyBlock,
     signatures: BTreeMap<PublicKey, (FinalitySignature, BTreeSet<NodeId>)>,
     peers: BTreeSet<NodeId>,
     last_progress: Timestamp,
@@ -37,10 +39,10 @@ pub(super) enum ShouldStore {
         block_signatures: BlockSignatures,
     },
     CompletedBlock {
-        meta_block: MetaBlock,
+        meta_block: LazyBlock,
         block_signatures: BlockSignatures,
     },
-    MarkComplete(MetaBlock),
+    MarkComplete(LazyBlock),
     SingleSignature(FinalitySignature),
     Nothing,
 }
@@ -52,7 +54,7 @@ impl BlockAcceptor {
     {
         Self {
             block_hash,
-            meta_block: None,
+            meta_block: LazyBlock::NotPresent,
             signatures: BTreeMap::new(),
             peers: peers.into_iter().collect(),
             last_progress: Timestamp::now(),
@@ -100,15 +102,16 @@ impl BlockAcceptor {
             self.register_peer(node_id);
         }
 
-        match self.meta_block.take() {
-            Some(existing_meta_block) => {
-                let merged_meta_block = existing_meta_block.merge(meta_block)?;
-                self.meta_block = Some(merged_meta_block);
-            }
-            None => {
-                self.meta_block = Some(meta_block);
-            }
-        }
+        // match self.meta_block.take() {
+        //     Some(existing_meta_block) => {
+        //         let merged_meta_block = existing_meta_block.merge(meta_block)?;
+        //         self.meta_block = Some(merged_meta_block);
+        //     }
+        //     None => {
+        //         self.meta_block = Some(meta_block);
+        //     }
+        // }
+        self.meta_block.merge_or_insert_meta_block(meta_block)?;
 
         Ok(())
     }
@@ -164,15 +167,15 @@ impl BlockAcceptor {
             return Ok(None);
         }
 
-        if let Some(meta_block) = &self.meta_block {
+        if let Some(era_id) = self.meta_block.era_id() {
             // if the signature's era does not match the block's era
             // it's malicious / bogus / invalid.
-            if meta_block.block.header().era_id() != finality_signature.era_id {
+            if era_id != finality_signature.era_id {
                 match peer {
                     Some(node_id) => {
                         return Err(AcceptorError::EraMismatch {
                             block_hash: finality_signature.block_hash,
-                            expected: meta_block.block.header().era_id(),
+                            expected: era_id,
                             actual: finality_signature.era_id,
                             peer: node_id,
                         });
@@ -215,18 +218,21 @@ impl BlockAcceptor {
         era_validator_weights: &EraValidatorWeights,
     ) -> (ShouldStore, Vec<(NodeId, AcceptorError)>) {
         let block_hash = self.block_hash;
-        let no_block = self.meta_block.is_none();
+        let no_block = self.meta_block.state_mut().is_none();
         let no_sigs = self.signatures.is_empty();
         if self.has_sufficient_finality() {
-            if let Some(meta_block) = self.meta_block.as_mut() {
-                if meta_block.state.is_executed()
-                    && meta_block.state.register_as_marked_complete().was_updated()
+            if let Some(meta_block_state) = self.meta_block.state_mut() {
+                if meta_block_state.is_executed()
+                    && meta_block_state.register_as_marked_complete().was_updated()
                 {
                     debug!(
                         %block_hash, no_block, no_sigs,
                         "already have sufficient finality signatures, but marking block complete"
                     );
-                    return (ShouldStore::MarkComplete(meta_block.clone()), Vec::new());
+                    return (
+                        ShouldStore::MarkComplete(self.meta_block.clone()),
+                        Vec::new(),
+                    );
                 }
             }
 
@@ -246,69 +252,74 @@ impl BlockAcceptor {
         let signature_weight = era_validator_weights.signature_weight(self.signatures.keys());
         if SignatureWeight::Strict == signature_weight {
             self.touch();
-            if let Some(meta_block) = self.meta_block.as_mut() {
-                let mut block_signatures = BlockSignatures::new(
-                    *meta_block.block.hash(),
-                    meta_block.block.header().era_id(),
-                );
+            let maybe_block_hash = self.meta_block.block_hash();
+            let maybe_height = self.meta_block.height();
+            let maybe_era_id = self.meta_block.era_id();
+            let maybe_state = self.meta_block.state_mut();
+            if let (Some(block_hash), Some(height), Some(era_id), Some(meta_block_state)) =
+                (maybe_block_hash, maybe_height, maybe_era_id, maybe_state)
+            {
+                let mut block_signatures = BlockSignatures::new(block_hash, era_id);
                 self.signatures.values().for_each(|(signature, _)| {
                     block_signatures
                         .insert_proof(signature.public_key.clone(), signature.signature);
                 });
-                if meta_block
-                    .state
+                if meta_block_state
                     .register_has_sufficient_finality()
                     .was_already_registered()
                 {
                     error!(
                         %block_hash,
-                        block_height = meta_block.block.height(),
-                        meta_block_state = ?meta_block.state,
+                        block_height = height,
+                        meta_block_state = ?meta_block_state,
                         "should not register having sufficient finality for the same block more \
                         than once"
                     );
                 }
-                if meta_block.state.is_executed() {
-                    if meta_block
-                        .state
+                if meta_block_state.is_executed() {
+                    if meta_block_state
                         .register_as_marked_complete()
                         .was_already_registered()
                     {
                         error!(
                             %block_hash,
-                            block_height = meta_block.block.height(),
-                            meta_block_state = ?meta_block.state,
+                            block_height = height,
+                            meta_block_state = ?meta_block_state,
                             "should not mark the same block complete more than once"
                         );
                     }
 
                     return (
                         ShouldStore::CompletedBlock {
-                            meta_block: meta_block.clone(),
+                            meta_block: self.meta_block.clone(),
                             block_signatures,
                         },
                         faulty_senders,
                     );
                 } else {
-                    if meta_block
-                        .state
+                    if meta_block_state
                         .register_as_stored()
                         .was_already_registered()
                     {
                         error!(
                             %block_hash,
-                            block_height = meta_block.block.height(),
-                            meta_block_state = ?meta_block.state,
+                            block_height = height,
+                            meta_block_state = ?meta_block_state,
                             "should not store the same block more than once"
                         );
                     }
-                    return (
-                        ShouldStore::SufficientlySignedBlock {
-                            meta_block: meta_block.clone(),
-                            block_signatures,
-                        },
-                        faulty_senders,
-                    );
+                    match self.meta_block.meta_block() {
+                        Some(meta_block) => {
+                            return (
+                                ShouldStore::SufficientlySignedBlock {
+                                    meta_block: meta_block.clone(),
+                                    block_signatures,
+                                },
+                                faulty_senders,
+                            )
+                        }
+                        None => todo!("still idk"),
+                    }
                 }
             }
         }
@@ -329,14 +340,14 @@ impl BlockAcceptor {
 
     pub(super) fn has_sufficient_finality(&self) -> bool {
         self.meta_block
-            .as_ref()
-            .map(|meta_block| meta_block.state.has_sufficient_finality())
+            .state()
+            .map(|meta_block_state| meta_block_state.has_sufficient_finality())
             .unwrap_or(false)
     }
 
     pub(super) fn era_id(&self) -> Option<EraId> {
-        if let Some(meta_block) = &self.meta_block {
-            return Some(meta_block.block.header().era_id());
+        if let Some(era_id) = self.meta_block.era_id() {
+            return Some(era_id);
         }
         if let Some((finality_signature, _)) = self.signatures.values().next() {
             return Some(finality_signature.era_id);
@@ -345,9 +356,7 @@ impl BlockAcceptor {
     }
 
     pub(super) fn block_height(&self) -> Option<u64> {
-        self.meta_block
-            .as_ref()
-            .map(|meta_block| meta_block.block.header().height())
+        self.meta_block.height()
     }
 
     pub(super) fn block_hash(&self) -> BlockHash {
@@ -358,12 +367,25 @@ impl BlockAcceptor {
         &self,
         activation_point: Option<ActivationPoint>,
     ) -> Option<bool> {
-        match (&self.meta_block, activation_point) {
-            (None, _) => None,
-            (Some(_), None) => Some(false),
-            (Some(meta_block), Some(activation_point)) => {
-                Some(meta_block.is_upgrade_boundary(activation_point))
+        // match (&self.meta_block, activation_point) {
+        //     (None, _) => None,
+        //     (Some(_), None) => Some(false),
+        //     (Some(meta_block), Some(activation_point)) => {
+        //         Some(meta_block.is_upgrade_boundary(activation_point))
+        //     }
+        // }
+
+        let (meta_block_era_id, is_switch_block) = match self.meta_block.block_header() {
+            Some(header) => (header.era_id(), header.is_switch_block()),
+            None => return None,
+        };
+
+        match activation_point {
+            Some(ActivationPoint::EraId(era_id)) => {
+                Some(is_switch_block && meta_block_era_id.successor() == era_id)
             }
+            Some(ActivationPoint::Genesis(_)) => Some(false),
+            None => Some(false),
         }
     }
 
@@ -392,11 +414,11 @@ impl BlockAcceptor {
             }
         });
 
-        if let Some(meta_block) = &self.meta_block {
+        if let Some(era_id) = &self.meta_block.era_id() {
             let bogus_validators = self
                 .signatures
                 .iter()
-                .filter(|(_, (v, _))| v.era_id != meta_block.block.header().era_id())
+                .filter(|(_, (v, _))| v.era_id != *era_id)
                 .map(|(k, _)| k.clone())
                 .collect_vec();
 
@@ -447,12 +469,12 @@ fn check_signatures_from_peer_bound(
 impl BlockAcceptor {
     pub(super) fn executed(&self) -> bool {
         self.meta_block
-            .as_ref()
-            .map_or(false, |meta_block| meta_block.state.is_executed())
+            .state()
+            .map_or(false, |meta_block_state| meta_block_state.is_executed())
     }
 
     pub(super) fn meta_block(&self) -> Option<MetaBlock> {
-        self.meta_block.clone()
+        self.meta_block.meta_block().cloned()
     }
 
     pub(super) fn set_last_progress(&mut self, last_progress: Timestamp) {
@@ -460,14 +482,15 @@ impl BlockAcceptor {
     }
 
     pub(super) fn set_meta_block(&mut self, meta_block: Option<MetaBlock>) {
-        self.meta_block = meta_block;
+        match meta_block {
+            Some(meta_block) => self.meta_block = LazyBlock::MetaBlock(meta_block),
+            None => self.meta_block = LazyBlock::NotPresent,
+        }
     }
 
     pub(super) fn set_sufficient_finality(&mut self, has_sufficient_finality: bool) {
-        if let Some(meta_block) = self.meta_block.as_mut() {
-            meta_block
-                .state
-                .set_sufficient_finality(has_sufficient_finality);
+        if let Some(meta_block_state) = self.meta_block.state_mut() {
+            meta_block_state.set_sufficient_finality(has_sufficient_finality);
         }
     }
 

@@ -11,6 +11,12 @@ use crate::core::execution;
 
 use super::wasm_config::WasmConfig;
 
+const ATOMIC_OPCODE_PREFIX: u8 = 0xfe;
+const BULK_OPCODE_PREFIX: u8 = 0xfc;
+const SIGN_EXT_OPCODE_START: u8 = 0xc0;
+const SIGN_EXT_OPCODE_END: u8 = 0xc4;
+const SIMD_OPCODE_PREFIX: u8 = 0xfd;
+
 const DEFAULT_GAS_MODULE_NAME: &str = "env";
 /// Name of the internal gas function injected by [`casper_wasm_utils::inject_gas_counter`].
 const INTERNAL_GAS_FUNCTION_NAME: &str = "gas";
@@ -415,7 +421,27 @@ pub fn preprocess(
 
 /// Returns a parity Module from the given bytes without making modifications or checking limits.
 pub fn deserialize(module_bytes: &[u8]) -> Result<Module, PreprocessingError> {
-    parity_wasm::deserialize_buffer::<Module>(module_bytes).map_err(Into::into)
+    parity_wasm::deserialize_buffer::<Module>(module_bytes).map_err(|deserialize_error| {
+        match deserialize_error {
+            parity_wasm::SerializationError::UnknownOpcode(BULK_OPCODE_PREFIX) => {
+                PreprocessingError::Deserialize(
+                    "Bulk memory operations are not supported".to_string(),
+                )
+            }
+            parity_wasm::SerializationError::UnknownOpcode(SIMD_OPCODE_PREFIX) => {
+                PreprocessingError::Deserialize("SIMD operations are not supported".to_string())
+            }
+            parity_wasm::SerializationError::UnknownOpcode(ATOMIC_OPCODE_PREFIX) => {
+                PreprocessingError::Deserialize("Atomic operations are not supported".to_string())
+            }
+            parity_wasm::SerializationError::UnknownOpcode(
+                SIGN_EXT_OPCODE_START..=SIGN_EXT_OPCODE_END,
+            ) => PreprocessingError::Deserialize(
+                "Sign extension operations are not supported".to_string(),
+            ),
+            _ => deserialize_error.into(),
+        }
+    })
 }
 
 /// Creates new wasm module from entry points.
@@ -453,7 +479,10 @@ mod tests {
         builder,
         elements::{CodeSection, Instructions},
     };
-    use walrus::{FunctionBuilder, ModuleConfig, ValType, ir::{Instr, Unop, UnaryOp}};
+    use walrus::{
+        ir::{Instr, UnaryOp, Unop},
+        FunctionBuilder, ModuleConfig, ValType,
+    };
 
     use super::*;
 
@@ -638,7 +667,6 @@ mod tests {
             .expect_err("should fail with an error");
         assert!(
             matches!(&error, PreprocessingError::Deserialize(msg)
-            // TODO: GH-3762 will improve the error message for unsupported wasm proposals.
             if msg == "Enable the multi_value feature to deserialize more than one function result"),
             "{:?}",
             error,
@@ -652,8 +680,7 @@ mod tests {
 
             let _memory_id = module.memories.add_local(false, 11, None);
 
-            let mut func_with_atomics =
-                FunctionBuilder::new(&mut module.types, &[], &[]);
+            let mut func_with_atomics = FunctionBuilder::new(&mut module.types, &[], &[]);
 
             func_with_atomics.func_body().atomic_fence();
 
@@ -673,8 +700,7 @@ mod tests {
             .expect_err("should fail with an error");
         assert!(
             matches!(&error, PreprocessingError::Deserialize(msg)
-            // TODO: GH-3762 will improve the error message for unsupported wasm proposals.
-            if msg == "Atomic operations not supported"),
+            if msg == "Atomic operations are not supported"),
             "{:?}",
             error,
         );
@@ -687,8 +713,7 @@ mod tests {
 
             let memory_id = module.memories.add_local(false, 11, None);
 
-            let mut func_with_bulk =
-                FunctionBuilder::new(&mut module.types, &[], &[]);
+            let mut func_with_bulk = FunctionBuilder::new(&mut module.types, &[], &[]);
 
             func_with_bulk.func_body().memory_copy(memory_id, memory_id);
 
@@ -708,7 +733,6 @@ mod tests {
             .expect_err("should fail with an error");
         assert!(
             matches!(&error, PreprocessingError::Deserialize(msg)
-            // TODO: GH-3762 will improve the error message for unsupported wasm proposals.
             if msg == "Bulk memory operations are not supported"),
             "{:?}",
             error,
@@ -722,8 +746,7 @@ mod tests {
 
             let _memory_id = module.memories.add_local(false, 11, None);
 
-            let mut func_with_simd =
-                FunctionBuilder::new(&mut module.types, &[], &[]);
+            let mut func_with_simd = FunctionBuilder::new(&mut module.types, &[], &[]);
 
             func_with_simd.func_body().v128_bitselect();
 
@@ -743,7 +766,6 @@ mod tests {
             .expect_err("should fail with an error");
         assert!(
             matches!(&error, PreprocessingError::Deserialize(msg)
-            // TODO: GH-3762 will improve the error message for unsupported wasm proposals.
             if msg == "SIMD operations are not supported"),
             "{:?}",
             error,
@@ -757,8 +779,7 @@ mod tests {
 
             let _memory_id = module.memories.add_local(false, 11, None);
 
-            let mut func_with_sign_ext =
-                FunctionBuilder::new(&mut module.types, &[], &[]);
+            let mut func_with_sign_ext = FunctionBuilder::new(&mut module.types, &[], &[]);
 
             func_with_sign_ext.func_body().i32_const(0);
 
@@ -766,7 +787,9 @@ mod tests {
                 let mut body = func_with_sign_ext.func_body();
                 let instructions = body.instrs_mut();
                 let (instr, _) = instructions.get_mut(0).unwrap();
-                *instr = Instr::Unop(Unop { op: UnaryOp::I32Extend8S });
+                *instr = Instr::Unop(Unop {
+                    op: UnaryOp::I32Extend8S,
+                });
             }
 
             let func_with_sign_ext = func_with_sign_ext.finish(vec![], &mut module.funcs);
@@ -785,7 +808,6 @@ mod tests {
             .expect_err("should fail with an error");
         assert!(
             matches!(&error, PreprocessingError::Deserialize(msg)
-            // TODO: GH-3762 will improve the error message for unsupported wasm proposals.
             if msg == "Sign extension operations are not supported"),
             "{:?}",
             error,
@@ -799,8 +821,7 @@ mod tests {
 
             let _memory_id = module.memories.add_local(false, 11, None);
 
-            let mut func_with_sign_ext =
-                FunctionBuilder::new(&mut module.types, &[], &[]);
+            let mut func_with_sign_ext = FunctionBuilder::new(&mut module.types, &[], &[]);
 
             func_with_sign_ext.func_body().i32_const(0);
 
@@ -808,7 +829,9 @@ mod tests {
                 let mut body = func_with_sign_ext.func_body();
                 let instructions = body.instrs_mut();
                 let (instr, _) = instructions.get_mut(0).unwrap();
-                *instr = Instr::Unop(Unop { op: UnaryOp::I32Extend16S });
+                *instr = Instr::Unop(Unop {
+                    op: UnaryOp::I32Extend16S,
+                });
             }
 
             let func_with_sign_ext = func_with_sign_ext.finish(vec![], &mut module.funcs);
@@ -827,7 +850,6 @@ mod tests {
             .expect_err("should fail with an error");
         assert!(
             matches!(&error, PreprocessingError::Deserialize(msg)
-            // TODO: GH-3762 will improve the error message for unsupported wasm proposals.
             if msg == "Sign extension operations are not supported"),
             "{:?}",
             error,
@@ -841,8 +863,7 @@ mod tests {
 
             let _memory_id = module.memories.add_local(false, 11, None);
 
-            let mut func_with_sign_ext =
-                FunctionBuilder::new(&mut module.types, &[], &[]);
+            let mut func_with_sign_ext = FunctionBuilder::new(&mut module.types, &[], &[]);
 
             func_with_sign_ext.func_body().i32_const(0);
 
@@ -850,7 +871,9 @@ mod tests {
                 let mut body = func_with_sign_ext.func_body();
                 let instructions = body.instrs_mut();
                 let (instr, _) = instructions.get_mut(0).unwrap();
-                *instr = Instr::Unop(Unop { op: UnaryOp::I64Extend8S });
+                *instr = Instr::Unop(Unop {
+                    op: UnaryOp::I64Extend8S,
+                });
             }
 
             let func_with_sign_ext = func_with_sign_ext.finish(vec![], &mut module.funcs);
@@ -869,7 +892,6 @@ mod tests {
             .expect_err("should fail with an error");
         assert!(
             matches!(&error, PreprocessingError::Deserialize(msg)
-            // TODO: GH-3762 will improve the error message for unsupported wasm proposals.
             if msg == "Sign extension operations are not supported"),
             "{:?}",
             error,
@@ -883,8 +905,7 @@ mod tests {
 
             let _memory_id = module.memories.add_local(false, 11, None);
 
-            let mut func_with_sign_ext =
-                FunctionBuilder::new(&mut module.types, &[], &[]);
+            let mut func_with_sign_ext = FunctionBuilder::new(&mut module.types, &[], &[]);
 
             func_with_sign_ext.func_body().i32_const(0);
 
@@ -892,7 +913,9 @@ mod tests {
                 let mut body = func_with_sign_ext.func_body();
                 let instructions = body.instrs_mut();
                 let (instr, _) = instructions.get_mut(0).unwrap();
-                *instr = Instr::Unop(Unop { op: UnaryOp::I64Extend16S });
+                *instr = Instr::Unop(Unop {
+                    op: UnaryOp::I64Extend16S,
+                });
             }
 
             let func_with_sign_ext = func_with_sign_ext.finish(vec![], &mut module.funcs);
@@ -911,7 +934,6 @@ mod tests {
             .expect_err("should fail with an error");
         assert!(
             matches!(&error, PreprocessingError::Deserialize(msg)
-            // TODO: GH-3762 will improve the error message for unsupported wasm proposals.
             if msg == "Sign extension operations are not supported"),
             "{:?}",
             error,
@@ -925,8 +947,7 @@ mod tests {
 
             let _memory_id = module.memories.add_local(false, 11, None);
 
-            let mut func_with_sign_ext =
-                FunctionBuilder::new(&mut module.types, &[], &[]);
+            let mut func_with_sign_ext = FunctionBuilder::new(&mut module.types, &[], &[]);
 
             func_with_sign_ext.func_body().i32_const(0);
 
@@ -934,7 +955,9 @@ mod tests {
                 let mut body = func_with_sign_ext.func_body();
                 let instructions = body.instrs_mut();
                 let (instr, _) = instructions.get_mut(0).unwrap();
-                *instr = Instr::Unop(Unop { op: UnaryOp::I64Extend32S });
+                *instr = Instr::Unop(Unop {
+                    op: UnaryOp::I64Extend32S,
+                });
             }
 
             let func_with_sign_ext = func_with_sign_ext.finish(vec![], &mut module.funcs);
@@ -953,7 +976,6 @@ mod tests {
             .expect_err("should fail with an error");
         assert!(
             matches!(&error, PreprocessingError::Deserialize(msg)
-            // TODO: GH-3762 will improve the error message for unsupported wasm proposals.
             if msg == "Sign extension operations are not supported"),
             "{:?}",
             error,
